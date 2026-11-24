@@ -7,6 +7,7 @@ export interface ReleaseInfo {
   notes: string;
   uploadedAt: string | null;
   downloadCount: number;
+  downloadUrl?: string;
 }
 
 export interface AuthStatus {

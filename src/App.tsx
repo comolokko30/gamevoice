@@ -1,14 +1,13 @@
 import {Check, Copy, Download, ShieldCheck, Upload} from 'lucide-react';
 import {useCallback, useEffect, useState} from 'react';
+import heroStudioImage from './assets/images/hero_gamevoice_studio_1795472193450.jpg';
 import {HostUploadModal} from './components/HostUploadModal';
 import {Navbar} from './components/Navbar';
 import type {AuthStatus, ReleaseInfo} from './types/release';
 
-const HERO_IMAGE = '/src/assets/images/hero_gamevoice_studio_1795472193450.jpg';
-
 const EMPTY_RELEASE: ReleaseInfo = {
   available: false,
-  fileName: 'GameVoice-Setup.exe',
+  fileName: 'GameVoice.exe',
   sizeBytes: 0,
   sha256: '',
   version: '1.0.0',
@@ -16,6 +15,27 @@ const EMPTY_RELEASE: ReleaseInfo = {
   uploadedAt: null,
   downloadCount: 0,
 };
+
+interface PublicReleaseJson {
+  fileName?: string;
+  version?: string;
+  downloadUrl?: string;
+  notes?: string;
+}
+
+function isSafeDownloadUrl(url: string): boolean {
+  const trimmed = url.trim();
+  if (!trimmed) return false;
+  if (trimmed.startsWith('./') || trimmed.startsWith('/')) {
+    return !trimmed.startsWith('//');
+  }
+  try {
+    const parsed = new URL(trimmed);
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:';
+  } catch {
+    return false;
+  }
+}
 
 function formatBytes(bytes: number): string {
   if (!bytes) return '—';
@@ -28,8 +48,8 @@ function formatBytes(bytes: number): string {
 
 export default function App() {
   const [release, setRelease] = useState<ReleaseInfo>(EMPTY_RELEASE);
+  const [backendAvailable, setBackendAvailable] = useState(true);
   const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState('');
   const [authStatus, setAuthStatus] = useState<AuthStatus>({
     envConfigured: false,
     claimed: false,
@@ -40,29 +60,94 @@ export default function App() {
   const [copiedShareLink, setCopiedShareLink] = useState(false);
   const [heroImgFailed, setHeroImgFailed] = useState(false);
 
-  const fetchReleaseAndAuth = useCallback(async () => {
+  const checkStaticRelease = useCallback(async (): Promise<ReleaseInfo | null> => {
+    let config: PublicReleaseJson = {};
     try {
-      setLoadError('');
-      const [releaseRes, authRes] = await Promise.all([
-        fetch('/api/release'),
-        fetch('/api/auth/status'),
-      ]);
-      if (!releaseRes.ok) {
-        throw new Error('Dosya bilgisi alınamadı.');
-      }
-      const releaseData = (await releaseRes.json()) as ReleaseInfo;
-      setRelease(releaseData);
-
-      if (authRes.ok) {
-        const authData = (await authRes.json()) as AuthStatus;
-        setAuthStatus(authData);
+      const jsonRes = await fetch('./release.json');
+      const contentType = jsonRes.headers.get('content-type') || '';
+      if (jsonRes.ok && contentType.includes('application/json')) {
+        config = (await jsonRes.json()) as PublicReleaseJson;
       }
     } catch {
-      setLoadError('Sunucudan dosya durumu alınamadı. Sayfayı yenilemeyi deneyin.');
+      // ignore missing static release.json
+    }
+
+    if (config.downloadUrl && isSafeDownloadUrl(config.downloadUrl)) {
+      return {
+        available: true,
+        fileName: config.fileName || 'GameVoice.exe',
+        sizeBytes: 0,
+        sha256: '',
+        version: config.version || '1.0.0',
+        notes: config.notes || '',
+        uploadedAt: null,
+        downloadCount: 0,
+        downloadUrl: config.downloadUrl.trim(),
+      };
+    }
+
+    const candidateName = (config.fileName || 'GameVoice.exe').replace(/[^a-zA-Z0-9._-]/g, '_');
+    try {
+      const headRes = await fetch(`./${candidateName}`, {method: 'HEAD'});
+      const contentType = headRes.headers.get('content-type') || '';
+      if (headRes.ok && !contentType.includes('text/html')) {
+        const len = Number(headRes.headers.get('content-length') || '0');
+        return {
+          available: true,
+          fileName: candidateName,
+          sizeBytes: Number.isFinite(len) ? len : 0,
+          sha256: '',
+          version: config.version || '1.0.0',
+          notes: config.notes || '',
+          uploadedAt: null,
+          downloadCount: 0,
+          downloadUrl: `./${candidateName}`,
+        };
+      }
+    } catch {
+      // ignore missing static exe
+    }
+
+    return null;
+  }, []);
+
+  const fetchReleaseAndAuth = useCallback(async () => {
+    try {
+      const [releaseRes, authRes] = await Promise.all([
+        fetch('./api/release'),
+        fetch('./api/auth/status'),
+      ]);
+
+      const releaseType = releaseRes.headers.get('content-type') || '';
+      if (releaseRes.ok && releaseType.includes('application/json')) {
+        setBackendAvailable(true);
+        const releaseData = (await releaseRes.json()) as ReleaseInfo;
+        if (releaseData.available) {
+          setRelease(releaseData);
+        } else {
+          const staticFallback = await checkStaticRelease();
+          setRelease(staticFallback || releaseData);
+        }
+
+        const authType = authRes.headers.get('content-type') || '';
+        if (authRes.ok && authType.includes('application/json')) {
+          const authData = (await authRes.json()) as AuthStatus;
+          setAuthStatus(authData);
+        }
+        return;
+      }
+
+      setBackendAvailable(false);
+      const staticRelease = await checkStaticRelease();
+      setRelease(staticRelease || EMPTY_RELEASE);
+    } catch {
+      setBackendAvailable(false);
+      const staticRelease = await checkStaticRelease();
+      setRelease(staticRelease || EMPTY_RELEASE);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [checkStaticRelease]);
 
   useEffect(() => {
     fetchReleaseAndAuth();
@@ -70,24 +155,34 @@ export default function App() {
 
   function handleDownload() {
     if (!release.available) {
-      setUploadModalOpen(true);
+      if (backendAvailable) {
+        setUploadModalOpen(true);
+      }
       return;
     }
+
+    const href =
+      release.downloadUrl && isSafeDownloadUrl(release.downloadUrl)
+        ? release.downloadUrl
+        : './download/gamevoice.exe';
+
     const link = document.createElement('a');
-    link.href = '/download/gamevoice.exe';
-    link.download = release.fileName || 'GameVoice-Setup.exe';
+    link.href = href;
+    link.download = release.fileName || 'GameVoice.exe';
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
 
-    window.setTimeout(() => {
-      fetchReleaseAndAuth();
-    }, 900);
+    if (backendAvailable) {
+      window.setTimeout(() => {
+        fetchReleaseAndAuth();
+      }, 900);
+    }
   }
 
   async function handleCopyShareLink() {
     try {
-      await navigator.clipboard.writeText(window.location.origin);
+      await navigator.clipboard.writeText(window.location.href);
       setCopiedShareLink(true);
       window.setTimeout(() => setCopiedShareLink(false), 2000);
     } catch {
@@ -99,6 +194,7 @@ export default function App() {
     <div className="flex min-h-screen flex-col bg-[#090A0D] text-[#F5F7FA]">
       <Navbar
         available={release.available}
+        backendAvailable={backendAvailable}
         onDownload={handleDownload}
         onOpenUpload={() => setUploadModalOpen(true)}
       />
@@ -127,12 +223,6 @@ export default function App() {
                 doğrudan indir.
               </p>
 
-              {loadError && (
-                <p className="mt-4 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-2.5 text-sm text-red-300">
-                  {loadError}
-                </p>
-              )}
-
               <div className="mt-8 flex flex-wrap items-center gap-3">
                 {loading ? (
                   <div className="h-12 w-56 animate-pulse rounded-lg bg-[#161922]" />
@@ -145,7 +235,7 @@ export default function App() {
                     <Download className="h-4 w-4" />
                     <span>GameVoice İndir (.exe)</span>
                   </button>
-                ) : (
+                ) : backendAvailable ? (
                   <button
                     type="button"
                     onClick={() => setUploadModalOpen(true)}
@@ -153,6 +243,15 @@ export default function App() {
                   >
                     <Upload className="h-4 w-4" />
                     <span>.exe Dosyası Yükle</span>
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    disabled
+                    className="inline-flex items-center gap-2.5 rounded-lg bg-[#1E212B] px-6 py-3.5 text-sm font-semibold text-[#6B7287] whitespace-nowrap shrink-0"
+                  >
+                    <Download className="h-4 w-4" />
+                    <span>Dosya Henüz Eklenmedi</span>
                   </button>
                 )}
 
@@ -179,16 +278,29 @@ export default function App() {
                 {release.available ? (
                   <>
                     <span className="font-mono text-[#E2E6F0]">{release.fileName}</span>
-                    <span aria-hidden="true">·</span>
-                    <span className="font-mono">{formatBytes(release.sizeBytes)}</span>
+                    {release.sizeBytes > 0 && (
+                      <>
+                        <span aria-hidden="true">·</span>
+                        <span className="font-mono">{formatBytes(release.sizeBytes)}</span>
+                      </>
+                    )}
                     <span aria-hidden="true">·</span>
                     <span>Sürüm {release.version}</span>
-                    <span aria-hidden="true">·</span>
-                    <span>{release.downloadCount} indirme</span>
+                    {backendAvailable && release.downloadCount > 0 && (
+                      <>
+                        <span aria-hidden="true">·</span>
+                        <span>{release.downloadCount} indirme</span>
+                      </>
+                    )}
                   </>
-                ) : (
+                ) : backendAvailable ? (
                   <span>
                     Henüz .exe dosyası yüklenmedi. Dosyayı eklemek için yukarıdaki düğmeyi kullan.
+                  </span>
+                ) : (
+                  <span>
+                    Dosyayı eklemek için repodaki public/GameVoice.exe dosyasını yükle veya
+                    public/release.json içine indirme bağlantısı ekle.
                   </span>
                 )}
               </div>
@@ -202,7 +314,7 @@ export default function App() {
               <div className="relative h-full min-h-[300px] overflow-hidden rounded-xl border border-[#222530] bg-[#12141A]">
                 {!heroImgFailed ? (
                   <img
-                    src={HERO_IMAGE}
+                    src={heroStudioImage}
                     alt="GameVoice masaüstü oyun ve ses stüdyosu kurulumu"
                     referrerPolicy="no-referrer"
                     onError={() => setHeroImgFailed(true)}
@@ -225,13 +337,15 @@ export default function App() {
       <footer className="border-t border-[#1C1F29] py-6">
         <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-6 text-xs text-[#6B7287]">
           <span>GameVoice</span>
-          <button
-            type="button"
-            onClick={() => setUploadModalOpen(true)}
-            className="text-[#949BB0] hover:text-[#F5F7FA] transition-colors cursor-pointer"
-          >
-            Dosya Yönetimi
-          </button>
+          {backendAvailable && (
+            <button
+              type="button"
+              onClick={() => setUploadModalOpen(true)}
+              className="text-[#949BB0] hover:text-[#F5F7FA] transition-colors cursor-pointer"
+            >
+              Dosya Yönetimi
+            </button>
+          )}
         </div>
       </footer>
 

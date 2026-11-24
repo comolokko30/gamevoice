@@ -1,10 +1,11 @@
 interface NavbarProps {
   available: boolean;
+  backendAvailable: boolean;
   onDownload: () => void;
   onOpenUpload: () => void;
 }
 
-export function Navbar({available, onDownload, onOpenUpload}: NavbarProps) {
+export function Navbar({available, backendAvailable, onDownload, onOpenUpload}: NavbarProps) {
   return (
     <header className="border-b border-[#222530] bg-[#090A0D]">
       <div className="mx-auto flex max-w-6xl items-center justify-between gap-8 px-6 py-4">
@@ -16,13 +17,15 @@ export function Navbar({available, onDownload, onOpenUpload}: NavbarProps) {
         </a>
 
         <div className="flex items-center gap-6 shrink-0">
-          <button
-            type="button"
-            onClick={onOpenUpload}
-            className="text-sm font-medium text-[#949BB0] hover:text-[#F5F7FA] transition-colors duration-150 whitespace-nowrap shrink-0 cursor-pointer"
-          >
-            Dosya Yükle
-          </button>
+          {backendAvailable && (
+            <button
+              type="button"
+              onClick={onOpenUpload}
+              className="text-sm font-medium text-[#949BB0] hover:text-[#F5F7FA] transition-colors duration-150 whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              Dosya Yükle
+            </button>
+          )}
 
           {available && (
             <button

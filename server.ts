@@ -53,18 +53,54 @@ function assertInsideUploads(targetPath: string): string {
   return resolved;
 }
 
-function readReleaseMeta(): StoredReleaseMeta | null {
+const PUBLIC_EXE_PATH = path.resolve(__dirname, 'public', 'GameVoice.exe');
+const PUBLIC_META_PATH = path.resolve(__dirname, 'public', 'release.json');
+
+interface PublicReleaseConfig {
+  fileName?: string;
+  version?: string;
+  downloadUrl?: string;
+  notes?: string;
+}
+
+function readPublicReleaseConfig(): PublicReleaseConfig | null {
   try {
-    if (!fs.existsSync(META_PATH) || !fs.existsSync(EXE_STORAGE_PATH)) {
+    if (!fs.existsSync(PUBLIC_META_PATH)) {
       return null;
     }
-    const raw = fs.readFileSync(META_PATH, 'utf8');
-    const parsed = JSON.parse(raw) as StoredReleaseMeta;
-    const stats = fs.statSync(EXE_STORAGE_PATH);
-    return {
-      ...parsed,
-      sizeBytes: stats.size,
-    };
+    return JSON.parse(fs.readFileSync(PUBLIC_META_PATH, 'utf8')) as PublicReleaseConfig;
+  } catch {
+    return null;
+  }
+}
+
+function readReleaseMeta(): StoredReleaseMeta | null {
+  try {
+    if (fs.existsSync(META_PATH) && fs.existsSync(EXE_STORAGE_PATH)) {
+      const raw = fs.readFileSync(META_PATH, 'utf8');
+      const parsed = JSON.parse(raw) as StoredReleaseMeta;
+      const stats = fs.statSync(EXE_STORAGE_PATH);
+      return {
+        ...parsed,
+        sizeBytes: stats.size,
+      };
+    }
+
+    if (fs.existsSync(PUBLIC_EXE_PATH)) {
+      const stats = fs.statSync(PUBLIC_EXE_PATH);
+      const pubConfig = readPublicReleaseConfig();
+      return {
+        fileName: sanitizeExeFileName(pubConfig?.fileName || 'GameVoice.exe'),
+        sizeBytes: stats.size,
+        sha256: '',
+        version: pubConfig?.version || '1.0.0',
+        notes: pubConfig?.notes || '',
+        uploadedAt: stats.mtime.toISOString(),
+        downloadCount: 0,
+      };
+    }
+
+    return null;
   } catch {
     return null;
   }
@@ -388,21 +424,26 @@ async function startServer() {
 
   const handleDownload = (_req: Request, res: Response) => {
     const meta = readReleaseMeta();
-    if (!meta || !fs.existsSync(EXE_STORAGE_PATH)) {
+    const hasUploadedExe = fs.existsSync(EXE_STORAGE_PATH);
+    const hasPublicExe = fs.existsSync(PUBLIC_EXE_PATH);
+
+    if (!meta || (!hasUploadedExe && !hasPublicExe)) {
       res.status(404).json({
         error: 'Henüz indirilebilir bir GameVoice .exe dosyası yüklenmemiş.',
       });
       return;
     }
 
-    const updated: StoredReleaseMeta = {
-      ...meta,
-      downloadCount: (meta.downloadCount || 0) + 1,
-    };
-    try {
-      writeReleaseMeta(updated);
-    } catch {
-      // Download still proceeds even if counter write fails
+    if (hasUploadedExe) {
+      const updated: StoredReleaseMeta = {
+        ...meta,
+        downloadCount: (meta.downloadCount || 0) + 1,
+      };
+      try {
+        writeReleaseMeta(updated);
+      } catch {
+        // Download still proceeds even if counter write fails
+      }
     }
 
     const downloadName = sanitizeExeFileName(meta.fileName);
@@ -412,7 +453,9 @@ async function startServer() {
       `attachment; filename="${downloadName}"`,
     );
     res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.sendFile(assertInsideUploads(EXE_STORAGE_PATH));
+    res.sendFile(
+      hasUploadedExe ? assertInsideUploads(EXE_STORAGE_PATH) : PUBLIC_EXE_PATH,
+    );
   };
 
   app.get('/download/gamevoice.exe', handleDownload);
